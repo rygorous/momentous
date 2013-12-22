@@ -97,6 +97,120 @@ static ID3D11Buffer* make_cube_inds(ID3D11Device* dev, int num_cubes)
     return ind_buf;
 }
 
+static bool is_pow2(int x)
+{
+    return x != 0 && (x & (x - 1)) == 0;
+}
+
+static float randf()
+{
+    return 1.0f * rand() / RAND_MAX;
+}
+
+static math::vec3 rand_unit_vec3()
+{
+    math::vec3 v;
+    float l;
+
+    do
+    {
+        v.x = 2.0f * randf() - 1.0f;
+        v.y = 2.0f * randf() - 1.0f;
+        v.z = 2.0f * randf() - 1.0f;
+        l = math::len_sq(v);
+    } while (l == 0.0f || l > 1.0f);
+
+    return math::rsqrt(l) * v;
+}
+
+static int step_idx(int base, int step, int mask)
+{
+    return (base & ~mask) | ((base + step) & mask);
+}
+
+static d3du_tex* make_force_tex(ID3D11Device* dev, int size, float strength, float post_scale)
+{
+    using namespace math;
+    assert(is_pow2(size));
+
+    int stepx = 1, maskx = size - 1;
+    int stepy = size, masky = (size - 1) * size;
+    int stepz = size*size, maskz = (size - 1) * size * size;
+    int nelem = size * size * size;
+    vec4* forces = new vec4[nelem];
+    
+    d3du_tex* tex = d3du_tex::make3d(dev, size, size, size, 1, DXGI_FORMAT_R32G32B32A32_FLOAT,
+        D3D11_USAGE_IMMUTABLE, D3D11_BIND_SHADER_RESOURCE, forces, stepy * sizeof(*forces), stepz * sizeof(*forces));
+
+    // create a random vector field
+    for (int zo = 0; zo <= maskz; zo += stepz) {
+        for (int yo = 0; yo <= masky; yo += stepy) {
+            for (int xo = 0; xo <= maskx; xo += stepx) {
+                forces[xo + yo + zo] = math::vec4(strength * rand_unit_vec3(), 0.0f);
+            }
+        }
+    }
+
+    // calc divergences
+    float* div = new float[nelem];
+    float* high = new float[nelem];
+
+    float div_scale = -0.5f / (float)size;
+
+    for (int zo = 0; zo <= maskz; zo += stepz) {
+        for (int yo = 0; yo <= masky; yo += stepy) {
+            for (int xo = 0; xo <= maskx; xo += stepx) {
+                int o = xo + yo + zo;
+
+                div[o] = div_scale * 
+                    (
+                        forces[step_idx(o, stepx, maskx)].x - forces[step_idx(o, -stepx, maskx)].x +
+                        forces[step_idx(o, stepy, masky)].y - forces[step_idx(o, -stepy, masky)].y +
+                        forces[step_idx(o, stepz, maskz)].z - forces[step_idx(o, -stepz, maskz)].z
+                    );
+                high[o] = 0.0f;
+            }
+        }
+    }
+
+    // gauss-seidel iteration to calc density field
+    for (int step = 0; step < 40; step++) {
+        for (int zo = 0; zo <= maskz; zo += stepz) {
+            for (int yo = 0; yo <= masky; yo += stepy) {
+                for (int xo = 0; xo <= maskx; xo += stepx) {
+                    int o = xo + yo + zo;
+                    high[o] =
+                        (
+                            high[step_idx(o, -stepx, maskx)] + high[step_idx(o, stepx, maskx)] +
+                            high[step_idx(o, -stepy, masky)] + high[step_idx(o, stepy, masky)] +
+                            high[step_idx(o, -stepz, maskz)] + high[step_idx(o, stepz, maskz)]
+                        ) * (1.0f / 6.0f) - div[o];
+                }
+            }
+        }
+    }
+
+    // remove gradients from vector field
+    float grad_scale = 0.5f * (float)size;
+    for (int zo = 0; zo <= maskz; zo += stepz) {
+        for (int yo = 0; yo <= masky; yo += stepy) {
+            for (int xo = 0; xo <= maskx; xo += stepx) {
+                int o = xo + yo + zo;
+                vec4* f = forces + o;
+                
+                f->x = (f->x - grad_scale * (high[step_idx(o, stepx, maskx)] - high[step_idx(o, -stepx, maskx)])) * post_scale;
+                f->y = (f->y - grad_scale * (high[step_idx(o, stepy, masky)] - high[step_idx(o, -stepy, masky)])) * post_scale;
+                f->z = (f->z - grad_scale * (high[step_idx(o, stepz, maskz)] - high[step_idx(o, -stepz, maskz)])) * post_scale;
+            }
+        }
+    }
+    
+    delete[] div;
+    delete[] high;
+    delete[] forces;
+    return tex;
+}
+
 int main()
 {
     d3du_context *d3d = d3du_init("Momentous", 1280, 720, D3D_FEATURE_LEVEL_10_0);
@@ -134,9 +248,11 @@ int main()
         part_tex[i] = d3du_tex::make2d(d3d->dev, kChunkSize, kTexHeight, 1, DXGI_FORMAT_R32G32B32A32_FLOAT,
             D3D11_USAGE_DEFAULT, D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET, NULL, 0);
 
+    d3du_tex * force_tex = make_force_tex(d3d->dev, 32, 1.0f, 0.001f);
+
     int frame = 0;
     int cur_part = 0;
-    int num_cubes = 4096;
+    int num_cubes = 8192;
 
     while (d3du_handle_events(d3d)) {
         using namespace math;
@@ -184,6 +300,7 @@ int main()
 
     for (int i=0; i < 4; i++)
         delete part_tex[i];
+    delete force_tex;
 
     cube_const_buf->Release();
     cube_index_buf->Release();

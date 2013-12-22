@@ -93,8 +93,8 @@ CubeVert RenderCubeVertexShader(
 
     float t = time_offs + final_cube_id * 0.0013;
     float p0 = 0;
-    float p1 = (1.0 + time_offs)*0.723;
-    float p2 = (1.0 + time_offs)*1.853;
+    float p1 = (1.0 + time_offs)*9.723;
+    float p2 = (1.0 + time_offs)*15.853;
     float f0 = 13;
     float f1 = 31;
     float f2 = 23;

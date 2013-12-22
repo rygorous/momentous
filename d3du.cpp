@@ -515,6 +515,42 @@ d3du_tex * d3du_tex::make2d( ID3D11Device * dev, UINT w, UINT h, UINT num_mips, 
         return new d3du_tex( tex, srv, rtv );
 }
 
+d3du_tex * d3du_tex::make3d( ID3D11Device * dev, UINT w, UINT h, UINT d, UINT num_mips, DXGI_FORMAT fmt, D3D11_USAGE usage, UINT bind_flags, void const * initial, UINT init_row_pitch, UINT init_depth_pitch )
+{
+    HRESULT hr = S_OK;
+    ID3D11Texture3D *tex = NULL;
+    ID3D11ShaderResourceView *srv = NULL;
+
+    D3D11_TEXTURE3D_DESC desc;
+    desc.Width = w;
+    desc.Height = h;
+    desc.Depth = d;
+    desc.MipLevels = num_mips;
+    desc.Format = fmt;
+    desc.Usage = usage;
+    desc.BindFlags = bind_flags;
+    desc.CPUAccessFlags = 0;
+    desc.MiscFlags = 0;
+
+    D3D11_SUBRESOURCE_DATA initial_data;
+    initial_data.pSysMem = initial;
+    initial_data.SysMemPitch = init_row_pitch;
+    initial_data.SysMemSlicePitch = init_depth_pitch;
+
+    hr = dev->CreateTexture3D( &desc, initial ? &initial_data : nullptr, &tex );
+
+    if ( !FAILED( hr ) && ( bind_flags & D3D11_BIND_SHADER_RESOURCE ) )
+        hr = dev->CreateShaderResourceView( tex, nullptr, &srv );
+
+    if ( FAILED( hr ) )
+    {
+        safe_release( &tex );
+        safe_release( &srv );
+        return NULL;
+    } else
+        return new d3du_tex( tex, srv, NULL );
+}
+
 static const size_t TIMER_SLOTS = 4; // depth of queue of in-flight queries (must be pow2)
 
 struct d3du_timer_group

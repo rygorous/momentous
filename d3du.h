@@ -69,7 +69,11 @@ d3du_shader d3du_compile_and_create_shader( ID3D11Device * dev, char const * sou
 
 // Texture helper
 struct d3du_tex {
-    ID3D11Resource * resrc;
+    union {
+        ID3D11Resource * resrc;
+        ID3D11Texture2D * tex2d;
+        ID3D11Texture2D * tex3d;
+    };
     ID3D11ShaderResourceView * srv;
     ID3D11RenderTargetView * rtv;
 
@@ -77,6 +81,9 @@ struct d3du_tex {
 
     static d3du_tex * make2d( ID3D11Device * dev, UINT w, UINT h, UINT num_mips,
         DXGI_FORMAT fmt, D3D11_USAGE usage, UINT bind_flags, void const * initial, UINT initial_pitch );
+
+    static d3du_tex * make3d( ID3D11Device * dev, UINT w, UINT h, UINT d, UINT num_mips,
+        DXGI_FORMAT fmt, D3D11_USAGE usage, UINT bind_flags, void const * initial, UINT init_row_pitch, UINT init_depth_pitch );
 
 private:
     d3du_tex( ID3D11Resource * resrc, ID3D11ShaderResourceView * srv, ID3D11RenderTargetView * rtv );
