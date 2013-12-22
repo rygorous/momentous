@@ -1,7 +1,10 @@
 #define WIN32_LEAN_AND_MEAN
+#define NOMINMAX
 #include <Windows.h>
 #include <d3d11.h>
+#include <assert.h>
 #include <cmath>
+#include <algorithm>
 
 #include "d3du.h"
 #include "util.h"
@@ -10,7 +13,7 @@
 struct CubeConstBuf {
     math::mat44 clip_from_world;
     math::vec3 world_down_vector;
-    float cube_size;
+    float time_offs;
 
     math::vec3 light_color_ambient;
     float pad1;
@@ -22,6 +25,15 @@ struct CubeConstBuf {
     float pad4;
     math::vec3 light_dir;
     float pad5;
+};
+
+struct UpdateConstBuf {
+    math::vec3 field_scale;
+    float damping;
+    math::vec3 field_offs;
+    float speed;
+    math::vec3 field_sample_scale;
+    float vel_scale;
 };
 
 static float srgb2lin(float x)
@@ -42,7 +54,7 @@ static math::vec3 srgb_color(int col)
     );
 }
 
-static void* map_cbuf_typeless(d3du_context *ctx, ID3D11Buffer *buf)
+static void* map_cbuf_typeless(d3du_context* ctx, ID3D11Buffer* buf)
 {
     D3D11_MAPPED_SUBRESOURCE mapped;
     HRESULT hr = ctx->ctx->Map(buf, 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped);
@@ -52,14 +64,37 @@ static void* map_cbuf_typeless(d3du_context *ctx, ID3D11Buffer *buf)
 }
 
 template<typename T>
-static T* map_cbuf(d3du_context *ctx, ID3D11Buffer *buf)
+static T* map_cbuf(d3du_context* ctx, ID3D11Buffer* buf)
 {
     return (T*) map_cbuf_typeless(ctx, buf);
 }
 
-static void unmap_cbuf(d3du_context *ctx, ID3D11Buffer *buf)
+static void unmap_cbuf(d3du_context* ctx, ID3D11Buffer* buf)
 {
     ctx->ctx->Unmap(buf, 0);
+}
+
+static ID3D11Buffer* make_cube_inds(ID3D11Device* dev, int num_cubes)
+{
+    static const USHORT cube_inds[] = {
+        0, 2, 1, 3, 7, 2, 6, 0, 4, 1, 5, 7, 4, 6,
+    };
+
+    assert(num_cubes * 8 < 65535); // 65535 = prim restart
+    USHORT * ind_data = new USHORT[num_cubes * 15];
+    for (int i=0; i < num_cubes; i++)
+    {
+        USHORT * out_ind = ind_data + i*15;
+        for (UINT j=0; j < 14; j++)
+            out_ind[j] = cube_inds[j] + i*8;
+        out_ind[14] = 0xffff;
+    }
+
+    ID3D11Buffer* ind_buf = d3du_make_buffer(dev, num_cubes * 15 * sizeof(USHORT),
+        D3D11_USAGE_IMMUTABLE, D3D11_BIND_INDEX_BUFFER, ind_data);
+    delete[] ind_data;
+
+    return ind_buf;
 }
 
 int main()
@@ -68,6 +103,13 @@ int main()
 
     char *shader_source = read_file("shaders.hlsl");
 
+    ID3D11VertexShader *update_vs = d3du_compile_and_create_shader(d3d->dev, shader_source,
+        "vs_4_0", "UpdateVertShader").vs;
+    ID3D11PixelShader *update_pos_ps = d3du_compile_and_create_shader(d3d->dev, shader_source,
+        "ps_4_0", "UpdatePosShader").ps;
+    ID3D11PixelShader *update_vel_ps = d3du_compile_and_create_shader(d3d->dev, shader_source,
+        "ps_4_0", "UpdateVelShader").ps;
+
     ID3D11VertexShader *cube_vs = d3du_compile_and_create_shader(d3d->dev, shader_source,
         "vs_4_0", "RenderCubeVertexShader").vs;
     ID3D11PixelShader *cube_ps = d3du_compile_and_create_shader(d3d->dev, shader_source,
@@ -75,19 +117,26 @@ int main()
 
     free(shader_source);
 
-    static const USHORT cube_inds[] = {
-        0, 2, 1, 3, 7, 2, 6, 0, 4, 1, 5, 7, 4, 6,
-    };
+    static const UINT kChunkSize = 1024;
+    static const UINT kNumCubes = 128 * 1024;
+    static const UINT kTexHeight = (kNumCubes + kChunkSize - 1) / kChunkSize;
 
     ID3D11Buffer *cube_const_buf = d3du_make_buffer(d3d->dev, sizeof(CubeConstBuf),
         D3D11_USAGE_DYNAMIC, D3D11_BIND_CONSTANT_BUFFER, NULL);
 
-    ID3D11Buffer *cube_index_buf = d3du_make_buffer(d3d->dev, sizeof(cube_inds),
-        D3D11_USAGE_IMMUTABLE, D3D11_BIND_INDEX_BUFFER, cube_inds);
+    ID3D11Buffer *cube_index_buf = make_cube_inds(d3d->dev, kChunkSize);
 
     ID3D11RasterizerState *raster_state = d3du_simple_raster(d3d->dev, D3D11_CULL_BACK, true, false);
 
+    // triple-buffer for position, plus velocity
+    d3du_tex * part_tex[4];
+    for (int i=0; i < 4; i++)
+        part_tex[i] = d3du_tex::make2d(d3d->dev, kChunkSize, kTexHeight, 1, DXGI_FORMAT_R32G32B32A32_FLOAT,
+            D3D11_USAGE_DEFAULT, D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET, NULL, 0);
+
     int frame = 0;
+    int cur_part = 0;
+    int num_cubes = 4096;
 
     while (d3du_handle_events(d3d)) {
         using namespace math;
@@ -97,9 +146,8 @@ int main()
         d3d->ctx->ClearRenderTargetView(d3d->backbuf_rtv, clear_color);
 
         // set up camera
-        vec3 world_cam_pos(-2.0f, -2.0f, -5.0f);
+        vec3 world_cam_pos(0.3f, -0.3f, -2.2f);
         vec3 world_cam_target(0, 0, 0);
-        world_cam_pos.y = -2.0f * cos(frame++ * 0.01f);
         mat44 view_from_world = mat44::look_at(world_cam_pos, world_cam_target, vec3(0,1,0));
 
         // projection
@@ -108,8 +156,8 @@ int main()
 
         auto cube_consts = map_cbuf<CubeConstBuf>(d3d, cube_const_buf);
         cube_consts->clip_from_world = clip_from_world;
-        cube_consts->world_down_vector = vec3(0, 1, 0);
-        cube_consts->cube_size = 1.0f;
+        cube_consts->world_down_vector = math::vec3(0.0f, 1.0f, 0.0f);
+        cube_consts->time_offs = frame * 0.0001f;
         cube_consts->light_color_ambient = srgb_color(0x202020);
         cube_consts->light_color_key = srgb_color(0xc0c0c0);
         cube_consts->light_color_back = srgb_color(0x101040);
@@ -128,15 +176,22 @@ int main()
 
         d3d->ctx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP);
         d3d->ctx->IASetIndexBuffer(cube_index_buf, DXGI_FORMAT_R16_UINT, 0);
-        d3d->ctx->DrawIndexed(sizeof(cube_inds)/sizeof(*cube_inds), 0, 0);
+        d3d->ctx->DrawIndexedInstanced(kChunkSize * 15, (num_cubes + kChunkSize - 1) / kChunkSize, 0, 0, 0);
 
         d3du_swap_buffers(d3d, true);
+        frame++;
     }
+
+    for (int i=0; i < 4; i++)
+        delete part_tex[i];
 
     cube_const_buf->Release();
     cube_index_buf->Release();
     cube_ps->Release();
     cube_vs->Release();
+    update_vs->Release();
+    update_pos_ps->Release();
+    update_vel_ps->Release();
     raster_state->Release();
 
     d3du_shutdown(d3d);

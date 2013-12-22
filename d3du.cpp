@@ -460,6 +460,61 @@ d3du_shader d3du_compile_and_create_shader( ID3D11Device * dev, char const * sou
     return sh;
 }
 
+d3du_tex::d3du_tex( ID3D11Resource * resrc, ID3D11ShaderResourceView * srv, ID3D11RenderTargetView * rtv )
+    : resrc(resrc), srv(srv), rtv(rtv)
+{
+}
+
+d3du_tex::~d3du_tex()
+{
+    safe_release( &resrc );
+    safe_release( &srv );
+    safe_release( &rtv );
+}
+
+d3du_tex * d3du_tex::make2d( ID3D11Device * dev, UINT w, UINT h, UINT num_mips, DXGI_FORMAT fmt, D3D11_USAGE usage, UINT bind_flags, void const * initial, UINT initial_pitch )
+{
+    HRESULT hr = S_OK;
+    ID3D11Texture2D *tex = NULL;
+    ID3D11ShaderResourceView *srv = NULL;
+    ID3D11RenderTargetView *rtv = NULL;
+
+    D3D11_TEXTURE2D_DESC desc;
+    desc.Width = w;
+    desc.Height = h;
+    desc.MipLevels = num_mips;
+    desc.ArraySize = 1;
+    desc.Format = fmt;
+    desc.SampleDesc.Count = 1;
+    desc.SampleDesc.Quality = 0;
+    desc.Usage = usage;
+    desc.BindFlags = bind_flags;
+    desc.CPUAccessFlags = 0;
+    desc.MiscFlags = 0;
+
+    D3D11_SUBRESOURCE_DATA initial_data;
+    initial_data.pSysMem = initial;
+    initial_data.SysMemPitch = initial_pitch;
+    initial_data.SysMemSlicePitch = 0;
+
+    hr = dev->CreateTexture2D( &desc, initial ? &initial_data : nullptr, &tex );
+
+    if ( !FAILED( hr ) && ( bind_flags & D3D11_BIND_SHADER_RESOURCE ) )
+        hr = dev->CreateShaderResourceView( tex, nullptr, &srv );
+
+    if ( !FAILED( hr ) && ( bind_flags & D3D11_BIND_RENDER_TARGET ) )
+        hr = dev->CreateRenderTargetView( tex, nullptr, &rtv );
+
+    if ( FAILED( hr ) )
+    {
+        safe_release( &tex );
+        safe_release( &srv );
+        safe_release( &rtv );
+        return NULL;
+    } else
+        return new d3du_tex( tex, srv, rtv );
+}
+
 static const size_t TIMER_SLOTS = 4; // depth of queue of in-flight queries (must be pow2)
 
 struct d3du_timer_group

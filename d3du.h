@@ -67,6 +67,21 @@ union d3du_shader {
 // Compile and create a shader with the given profile on the given device
 d3du_shader d3du_compile_and_create_shader( ID3D11Device * dev, char const * source, char const * profile, char const * entrypt );
 
+// Texture helper
+struct d3du_tex {
+    ID3D11Resource * resrc;
+    ID3D11ShaderResourceView * srv;
+    ID3D11RenderTargetView * rtv;
+
+    ~d3du_tex();
+
+    static d3du_tex * make2d( ID3D11Device * dev, UINT w, UINT h, UINT num_mips,
+        DXGI_FORMAT fmt, D3D11_USAGE usage, UINT bind_flags, void const * initial, UINT initial_pitch );
+
+private:
+    d3du_tex( ID3D11Resource * resrc, ID3D11ShaderResourceView * srv, ID3D11RenderTargetView * rtv );
+};
+
 // D3DU timer measures how long D3D calls take on the GPU side
 // Create, call bracket begin/end around area you want to capture, then "report" at the end.
 typedef struct d3du_timer d3du_timer;
