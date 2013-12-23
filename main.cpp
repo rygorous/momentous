@@ -249,7 +249,7 @@ int main()
     free(shader_source);
 
     static const UINT kChunkSize = 1024;
-    static const UINT kNumCubes = 32 * 1024;
+    static const UINT kNumCubes = 48 * 1024;
     static const UINT kTexHeight = (kNumCubes + kChunkSize - 1) / kChunkSize;
 
     ID3D11Buffer* update_const_buf = d3du_make_buffer(d3d->dev, sizeof(UpdateConstBuf),
@@ -281,20 +281,20 @@ int main()
     while (d3du_handle_events(d3d)) {
         using namespace math;
 
-        static const float part_size = 0.002f;
+        static const float part_size = 0.001f;
+
+        vec3 emit_pos(0.0f);
+        emit_pos.x = 0.7f * sin(frame * 0.001f);
 
         // spawn new particles
         {
-            vec3 emit_pos(0.0f);
-            emit_pos.x = 0.7f * sin(frame * 0.001f);
-
             static const int kSpawnCount = 256;
             vec4 pos_old[kSpawnCount];
             vec4 pos_new[kSpawnCount];
 
             for (int i = 0; i < kSpawnCount; i++) {
                 vec3 pos = emit_pos + rand_vec3_unit_sphere() * 0.002f;
-                vec3 vel = rand_vec3_unit_sphere() * 0.001f;
+                vec3 vel = rand_vec3_unit_sphere() * 0.003f;
 
                 pos_old[i] = vec4(pos - vel, part_size);
                 pos_new[i] = vec4(pos, part_size);
@@ -319,9 +319,9 @@ int main()
         update_consts->field_scale = math::vec3(32.0f);
         update_consts->damping = 0.99f;
         update_consts->field_offs = math::vec3(0.0f);
-        update_consts->accel = 1.0f;
+        update_consts->accel = 0.75f;
         update_consts->field_sample_scale = math::vec3(1.0f / 32.0f);
-        update_consts->vel_scale = part_size * 4.0f;
+        update_consts->vel_scale = part_size * 6.0f;
         unmap_cbuf(d3d, update_const_buf);
 
         // update position (potentially several time steps)
@@ -362,7 +362,7 @@ int main()
             d3d->ctx->OMSetRenderTargets(1, s_no.rtvs, NULL);
         }
 
-        static const float clear_color[4] = { 0.3f, 0.6f, 0.9f, 1.0f };
+        static const float clear_color[4] = { 0.2f, 0.4f, 0.6f, 1.0f };
         d3d->ctx->ClearDepthStencilView(d3d->depthbuf_dsv, D3D11_CLEAR_DEPTH | D3D11_CLEAR_STENCIL, 1.0f, 0);
         d3d->ctx->ClearRenderTargetView(d3d->backbuf_rtv, clear_color);
 
@@ -371,12 +371,12 @@ int main()
         d3d->ctx->RSSetViewports(1, &d3d->default_vp);
 
         // set up camera
-        vec3 world_cam_pos(0.3f, -0.3f, -1.2f);
-        vec3 world_cam_target(0, 0, 0);
+        vec3 world_cam_pos(0.0f, 0.0f, -0.9f);
+        vec3 world_cam_target = emit_pos;
         mat44 view_from_world = mat44::look_at(world_cam_pos, world_cam_target, vec3(0,1,0));
 
         // projection
-        mat44 clip_from_view = mat44::perspectiveD3D(1280.0f / 720.0f, 1.0f, 1.0f, 1000.0f);
+        mat44 clip_from_view = mat44::perspectiveD3D(1280.0f / 720.0f, 1.0f, 0.01f, 50.0f);
         mat44 clip_from_world = clip_from_view * view_from_world;
 
         auto cube_consts = map_cbuf<CubeConstBuf>(d3d, cube_const_buf);
