@@ -1,4 +1,4 @@
-= Momentous
+# Momentous
 
 This is a reimplementation of the particle system from "fr-059: momentum",
 using D3D10 GPU hardware.
@@ -43,5 +43,5 @@ GL 3? Evidently not.
 Oh and I really need to add some camera control and shadow mapping, like the original
 version had.
 
--Fabian 'ryg' Giesen
+-Fabian 'ryg' Giesen,
  December 2013
