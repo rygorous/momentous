@@ -10,6 +10,12 @@
 #include "util.h"
 #include "math.h"
 
+static union {
+    ID3D11Buffer* buffers[16];
+    ID3D11ShaderResourceView* srvs[16];
+    ID3D11RenderTargetView* rtvs[16];
+} s_no;
+
 struct CubeConstBuf {
     math::mat44 clip_from_world;
     math::vec3 world_down_vector;
@@ -31,7 +37,7 @@ struct UpdateConstBuf {
     math::vec3 field_scale;
     float damping;
     math::vec3 field_offs;
-    float speed;
+    float accel;
     math::vec3 field_sample_scale;
     float vel_scale;
 };
@@ -107,7 +113,7 @@ static float randf()
     return 1.0f * rand() / RAND_MAX;
 }
 
-static math::vec3 rand_unit_vec3()
+static math::vec3 rand_vec3_unit_sphere(float* len_sq_out = nullptr)
 {
     math::vec3 v;
     float l;
@@ -118,8 +124,19 @@ static math::vec3 rand_unit_vec3()
         v.y = 2.0f * randf() - 1.0f;
         v.z = 2.0f * randf() - 1.0f;
         l = math::len_sq(v);
-    } while (l == 0.0f || l > 1.0f);
+    } while (l > 1.0f);
 
+    if (len_sq_out)
+        *len_sq_out = l;
+    return v;
+}
+
+static math::vec3 rand_unit_vec3()
+{
+    math::vec3 v;
+    float l;
+
+    do v = rand_vec3_unit_sphere(&l); while (l == 0.0f);
     return math::rsqrt(l) * v;
 }
 
@@ -139,9 +156,6 @@ static d3du_tex* make_force_tex(ID3D11Device* dev, int size, float strength, flo
     int nelem = size * size * size;
     vec4* forces = new vec4[nelem];
     
-    d3du_tex* tex = d3du_tex::make3d(dev, size, size, size, 1, DXGI_FORMAT_R32G32B32A32_FLOAT,
-        D3D11_USAGE_IMMUTABLE, D3D11_BIND_SHADER_RESOURCE, forces, stepy * sizeof(*forces), stepz * sizeof(*forces));
-
     // create a random vector field
     for (int zo = 0; zo <= maskz; zo += stepz) {
         for (int yo = 0; yo <= masky; yo += stepy) {
@@ -205,6 +219,9 @@ static d3du_tex* make_force_tex(ID3D11Device* dev, int size, float strength, flo
         }
     }
     
+    d3du_tex* tex = d3du_tex::make3d(dev, size, size, size, 1, DXGI_FORMAT_R32G32B32A32_FLOAT,
+        D3D11_USAGE_IMMUTABLE, D3D11_BIND_SHADER_RESOURCE, forces, stepy * sizeof(*forces), stepz * sizeof(*forces));
+
     delete[] div;
     delete[] high;
     delete[] forces;
@@ -213,9 +230,9 @@ static d3du_tex* make_force_tex(ID3D11Device* dev, int size, float strength, flo
 
 int main()
 {
-    d3du_context *d3d = d3du_init("Momentous", 1280, 720, D3D_FEATURE_LEVEL_10_0);
+    d3du_context* d3d = d3du_init("Momentous", 1280, 720, D3D_FEATURE_LEVEL_10_0);
 
-    char *shader_source = read_file("shaders.hlsl");
+    char* shader_source = read_file("shaders.hlsl");
 
     ID3D11VertexShader *update_vs = d3du_compile_and_create_shader(d3d->dev, shader_source,
         "vs_4_0", "UpdateVertShader").vs;
@@ -232,37 +249,129 @@ int main()
     free(shader_source);
 
     static const UINT kChunkSize = 1024;
-    static const UINT kNumCubes = 128 * 1024;
+    static const UINT kNumCubes = 32 * 1024;
     static const UINT kTexHeight = (kNumCubes + kChunkSize - 1) / kChunkSize;
 
-    ID3D11Buffer *cube_const_buf = d3du_make_buffer(d3d->dev, sizeof(CubeConstBuf),
+    ID3D11Buffer* update_const_buf = d3du_make_buffer(d3d->dev, sizeof(UpdateConstBuf),
         D3D11_USAGE_DYNAMIC, D3D11_BIND_CONSTANT_BUFFER, NULL);
 
-    ID3D11Buffer *cube_index_buf = make_cube_inds(d3d->dev, kChunkSize);
+    ID3D11Buffer* cube_const_buf = d3du_make_buffer(d3d->dev, sizeof(CubeConstBuf),
+        D3D11_USAGE_DYNAMIC, D3D11_BIND_CONSTANT_BUFFER, NULL);
 
-    ID3D11RasterizerState *raster_state = d3du_simple_raster(d3d->dev, D3D11_CULL_BACK, true, false);
+    ID3D11Buffer* cube_index_buf = make_cube_inds(d3d->dev, kChunkSize);
+
+    ID3D11RasterizerState* raster_state = d3du_simple_raster(d3d->dev, D3D11_CULL_BACK, true, false);
+    ID3D11SamplerState* force_sampler = d3du_simple_sampler(d3d->dev, D3D11_FILTER_MIN_MAG_LINEAR_MIP_POINT, D3D11_TEXTURE_ADDRESS_WRAP);
 
     // triple-buffer for position, plus velocity
-    d3du_tex * part_tex[4];
+    d3du_tex* part_tex[4];
     for (int i=0; i < 4; i++)
         part_tex[i] = d3du_tex::make2d(d3d->dev, kChunkSize, kTexHeight, 1, DXGI_FORMAT_R32G32B32A32_FLOAT,
             D3D11_USAGE_DEFAULT, D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET, NULL, 0);
 
-    d3du_tex * force_tex = make_force_tex(d3d->dev, 32, 1.0f, 0.001f);
+    d3du_tex* force_tex = make_force_tex(d3d->dev, 32, 1.0f, 0.001f);
+
+    D3D11_VIEWPORT part_vp = d3du_full_tex2d_viewport(part_tex[0]->tex2d);
 
     int frame = 0;
-    int cur_part = 0;
-    int num_cubes = 8192;
+    unsigned int cur_part = 0;
+    int num_cubes = kNumCubes;
+    unsigned int spawn_counter = 0;
 
     while (d3du_handle_events(d3d)) {
         using namespace math;
+
+        static const float part_size = 0.003f;
+
+        // spawn new particles
+        {
+            vec3 emit_pos(0.0f);
+            emit_pos.x = 0.7f * sin(frame * 0.001f);
+
+            static const int kSpawnCount = 64;
+            vec4 pos_old[kSpawnCount];
+            vec4 pos_new[kSpawnCount];
+
+            for (int i = 0; i < kSpawnCount; i++) {
+                vec3 pos = emit_pos + rand_vec3_unit_sphere() * 0.002f;
+                vec3 vel = rand_vec3_unit_sphere() * 0.001f;
+
+                pos_old[i] = vec4(pos - vel, part_size);
+                pos_new[i] = vec4(pos, part_size);
+            }
+
+            // upload
+            D3D11_BOX box = { };
+            box.left = spawn_counter % kChunkSize;
+            box.right = box.left + kSpawnCount;
+            box.top = spawn_counter / kChunkSize;
+            box.bottom = box.top + 1;
+            box.front = 0;
+            box.back = 1;
+            d3d->ctx->UpdateSubresource(part_tex[(cur_part + 2) % 3]->tex2d, 0, &box, pos_old, 0, 0);
+            d3d->ctx->UpdateSubresource(part_tex[cur_part]->tex2d, 0, &box, pos_new, 0, 0);
+
+            spawn_counter = (spawn_counter + kSpawnCount) % num_cubes;
+        }
+
+        // set up update constant buffer
+        auto update_consts = map_cbuf<UpdateConstBuf>(d3d, update_const_buf);
+        update_consts->field_scale = math::vec3(32.0f);
+        update_consts->damping = 0.99f;
+        update_consts->field_offs = math::vec3(0.0f);
+        update_consts->accel = 1.0f;
+        update_consts->field_sample_scale = math::vec3(1.0f / 32.0f);
+        update_consts->vel_scale = part_size * 4.0f;
+        unmap_cbuf(d3d, update_const_buf);
+
+        // update position (potentially several time steps)
+        d3d->ctx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP);
+
+        d3d->ctx->VSSetShader(update_vs, NULL, 0);
+        d3d->ctx->RSSetViewports(1, &part_vp);
+
+        d3d->ctx->PSSetShader(update_pos_ps, NULL, 0);
+        d3d->ctx->PSSetSamplers(0, 1, &force_sampler);
+        d3d->ctx->PSSetConstantBuffers(1, 1, &update_const_buf);
+        d3d->ctx->PSSetShaderResources(2, 1, &force_tex->srv);
+        for (int step=0; step < 1; step++) {
+            cur_part = (cur_part + 1) % 3;
+
+            ID3D11ShaderResourceView* srvs[2];
+            for (int i=0; i < 2; i++)
+                srvs[i] = part_tex[(cur_part + 1 + i) % 3]->srv;
+
+            d3d->ctx->PSSetShaderResources(0, 2, srvs);
+            d3d->ctx->OMSetRenderTargets(1, &part_tex[cur_part]->rtv, NULL);
+            d3d->ctx->Draw(3, 0);
+            d3d->ctx->PSSetShaderResources(0, 2, s_no.srvs);
+            d3d->ctx->OMSetRenderTargets(1, s_no.rtvs, NULL);
+        }
+
+        // update velocities
+        {
+            ID3D11ShaderResourceView* srvs[2];
+            for (int i=0; i < 2; i++)
+                srvs[i] = part_tex[(cur_part + 2 + i) % 3]->srv;
+
+            d3d->ctx->PSSetShader(update_vel_ps, NULL, 0);
+            d3d->ctx->PSSetShaderResources(0, 2, srvs);
+            d3d->ctx->OMSetRenderTargets(1, &part_tex[3]->rtv, NULL);
+            d3d->ctx->Draw(3, 0);
+            d3d->ctx->PSSetShaderResources(0, 2, s_no.srvs);
+            d3d->ctx->OMSetRenderTargets(1, s_no.rtvs, NULL);
+        }
 
         static const float clear_color[4] = { 0.3f, 0.6f, 0.9f, 1.0f };
         d3d->ctx->ClearDepthStencilView(d3d->depthbuf_dsv, D3D11_CLEAR_DEPTH | D3D11_CLEAR_STENCIL, 1.0f, 0);
         d3d->ctx->ClearRenderTargetView(d3d->backbuf_rtv, clear_color);
 
+        // back to main render target and viewport
+        d3d->ctx->OMSetRenderTargets(1, &d3d->backbuf_rtv, d3d->depthbuf_dsv);
+        d3d->ctx->RSSetViewports(1, &d3d->default_vp);
+
         // set up camera
-        vec3 world_cam_pos(0.3f, -0.3f, -2.2f);
+        vec3 world_cam_pos(0.3f, -0.3f, -1.2f);
         vec3 world_cam_target(0, 0, 0);
         mat44 view_from_world = mat44::look_at(world_cam_pos, world_cam_target, vec3(0,1,0));
 
@@ -281,18 +390,26 @@ int main()
         cube_consts->light_dir = normalize(vec3(0.0f, -0.7f, -0.3f));
         unmap_cbuf(d3d, cube_const_buf);
 
-        // render
+        // render cubes
+        ID3D11ShaderResourceView* part_pos_srvs[2];
+        part_pos_srvs[0] = part_tex[cur_part]->srv;
+        part_pos_srvs[1] = part_tex[3]->srv;
+
+        d3d->ctx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP);
+        d3d->ctx->IASetIndexBuffer(cube_index_buf, DXGI_FORMAT_R16_UINT, 0);
+
         d3d->ctx->VSSetShader(cube_vs, NULL, 0);
+        d3d->ctx->VSSetShaderResources(0, 2, part_pos_srvs);
         d3d->ctx->VSSetConstantBuffers(0, 1, &cube_const_buf);
+
+        d3d->ctx->RSSetState(raster_state);
 
         d3d->ctx->PSSetShader(cube_ps, NULL, 0);
         d3d->ctx->PSSetConstantBuffers(0, 1, &cube_const_buf);
 
-        d3d->ctx->RSSetState(raster_state);
-
-        d3d->ctx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP);
-        d3d->ctx->IASetIndexBuffer(cube_index_buf, DXGI_FORMAT_R16_UINT, 0);
         d3d->ctx->DrawIndexedInstanced(kChunkSize * 15, (num_cubes + kChunkSize - 1) / kChunkSize, 0, 0, 0);
+
+        d3d->ctx->VSSetShaderResources(0, 2, s_no.srvs);
 
         d3du_swap_buffers(d3d, true);
         frame++;
@@ -302,6 +419,7 @@ int main()
         delete part_tex[i];
     delete force_tex;
 
+    update_const_buf->Release();
     cube_const_buf->Release();
     cube_index_buf->Release();
     cube_ps->Release();
@@ -310,6 +428,7 @@ int main()
     update_pos_ps->Release();
     update_vel_ps->Release();
     raster_state->Release();
+    force_sampler->Release();
 
     d3du_shutdown(d3d);
     return 0;

@@ -22,7 +22,7 @@ cbuffer UpdateConsts : register(b1) {
     float3 field_scale;
     float  damping;
     float3 field_offs;
-    float  speed;
+    float  accel;
     float3 field_sample_scale;
     float  vel_scale;
 };
@@ -49,14 +49,21 @@ float4 UpdatePosShader(
     // determine force field sample pos
     float3 force_pos = newer_pos.xyz * field_scale + field_offs;
     float3 force_frac = frac(force_pos);
-    float3 force_smooth = force_frac * force_frac * (3.0 * force_frac - 2.0);
+    float3 force_smooth = force_frac * force_frac * (3.0 - 2.0 * force_frac);
     force_pos = (force_pos - force_frac) + force_smooth;
 
     // sample force from texture
     float3 force = tex_force.Sample(force_smp, force_pos * field_sample_scale).xyz;
 
     // verlet integration
-    return newer_pos + damping * (newer_pos - older_pos) + speed * float4(force, 0.0); 
+    float3 new_pos = newer_pos.xyz + damping * (newer_pos.xyz - older_pos.xyz);
+    new_pos += accel * force;
+
+    float4 output = float4(new_pos, newer_pos.w);
+    if (dot(new_pos, new_pos) > 1.0)
+        output.w = 0.0;
+
+    return output;
 }
 
 float4 UpdateVelShader(
@@ -80,29 +87,18 @@ CubeVert RenderCubeVertexShader(
 )
 {
     CubeVert v;
-    uint cube_id = vertex_id >> 3;
 
     // fetch cube position and velocity from textures
-    int3 fetch_coord = int3(cube_id, instance_id, 0);
-    //float4 cube_pos = tex_pos.Load(fetch_coord);
-    //float4 cube_vel = tex_vel.Load(fetch_coord);
-    //float4 cube_pos = float4(0, 0, 0, 0.05);
-    //float4 cube_fwd = float4(0.05, 0, 0, 0);
+    int3 fetch_coord = int3(vertex_id >> 3, instance_id, 0);
+    float4 cube_pos = tex_pos.Load(fetch_coord);
+    float4 cube_fwd = tex_fwd.Load(fetch_coord);
 
-    uint final_cube_id = cube_id + (instance_id << TEX_WIDTH_LOG2);
-
-    float t = time_offs + final_cube_id * 0.0013;
-    float p0 = 0;
-    float p1 = (1.0 + time_offs)*9.723;
-    float p2 = (1.0 + time_offs)*15.853;
-    float f0 = 13;
-    float f1 = 31;
-    float f2 = 23;
-
-    float3 pos = float3(sin(f0*t + p0), sin(f1*t + p1), sin(f2*t + p2));
-    float3 vel = float3(f0 * cos(f0*t + p0), f1 * cos(f1*t + p1), f2 * cos(f2*t + p2));
-    float4 cube_pos = float4(pos, 0.008);
-    float4 cube_fwd = float4(0.0003 * vel, 0);
+    // early-out if cube is off
+    if (cube_pos.w == 0.0) {
+        v.clip_pos = 0;
+        v.world_pos = 0;
+        return v;
+    }
 
     // determine local coordinate system
     float3 x_axis = cube_fwd.xyz;

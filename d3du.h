@@ -30,6 +30,9 @@ int d3du_handle_events( d3du_context * ctx );
 // Swap buffers.
 void d3du_swap_buffers( d3du_context * ctx, bool vsync );
 
+// Creates a D3D11_VIEWPORT for an entire render target view.
+D3D11_VIEWPORT d3du_full_tex2d_viewport( ID3D11Texture2D * tex );
+
 // Creates a buffer
 ID3D11Buffer * d3du_make_buffer( ID3D11Device * dev, UINT size, D3D11_USAGE use, UINT bind_flags, const void * initial );
 

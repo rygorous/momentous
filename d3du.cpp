@@ -200,6 +200,22 @@ void d3du_swap_buffers( d3du_context * ctx, bool vsync )
    ctx->swap->Present( vsync ? 1 : 0, 0 );
 }
 
+D3D11_VIEWPORT d3du_full_tex2d_viewport( ID3D11Texture2D * tex )
+{
+    D3D11_TEXTURE2D_DESC desc;
+    tex->GetDesc( &desc );
+
+    D3D11_VIEWPORT vp;
+    vp.TopLeftX = 0.0f;
+    vp.TopLeftY = 0.0f;
+    vp.Width = (float)desc.Width;
+    vp.Height = (float)desc.Height;
+    vp.MinDepth = 0.0f;
+    vp.MaxDepth = 1.0f;
+
+    return vp;
+}
+
 ID3D11Buffer * d3du_make_buffer( ID3D11Device * dev, UINT size, D3D11_USAGE use, UINT bind_flags, const void * initial )
 {
     D3D11_BUFFER_DESC desc;
