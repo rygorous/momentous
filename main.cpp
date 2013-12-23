@@ -281,14 +281,14 @@ int main()
     while (d3du_handle_events(d3d)) {
         using namespace math;
 
-        static const float part_size = 0.003f;
+        static const float part_size = 0.002f;
 
         // spawn new particles
         {
             vec3 emit_pos(0.0f);
             emit_pos.x = 0.7f * sin(frame * 0.001f);
 
-            static const int kSpawnCount = 64;
+            static const int kSpawnCount = 256;
             vec4 pos_old[kSpawnCount];
             vec4 pos_new[kSpawnCount];
 

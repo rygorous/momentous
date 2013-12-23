@@ -60,7 +60,9 @@ float4 UpdatePosShader(
     new_pos += accel * force;
 
     float4 output = float4(new_pos, newer_pos.w);
-    if (dot(new_pos, new_pos) > 1.0)
+
+    // nuke particles if they get too far from the origin
+    if (dot(new_pos, new_pos) > 16.0)
         output.w = 0.0;
 
     return output;
